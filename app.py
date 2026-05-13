@@ -170,11 +170,11 @@ if selected_stock:
     hist = get_chart_data(selected_stock)
 
     if hist is not None and not hist.empty:
-        import pandas_ta as ta
+        import ta as ta_lib
 
-        hist["MA20"] = hist["Close"].rolling(window=20).mean()
-        hist["MA50"] = hist["Close"].rolling(window=50).mean()
-        hist["RSI"]  = ta.rsi(hist["Close"], length=14)
+            hist["MA20"] = hist["Close"].rolling(window=20).mean()
+            hist["MA50"] = hist["Close"].rolling(window=50).mean()
+            hist["RSI"]  = ta_lib.momentum.RSIIndicator(hist["Close"], window=14).rsi()
 
         chart_type = st.radio(
             "Chart view",
