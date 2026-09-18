@@ -153,45 +153,7 @@ hr { border-color: #1e1e2e !important; }
 """, unsafe_allow_html=True)
 
 
-# ── Return Estimation Engine ──────────────────────────────
-def calculate_projected_returns(df, market_pe=22.0):
-    """
-    Computes 1Y, 3Y, and 5Y forward expected returns using sustainable
-    earnings growth, dividend reinvestment, and P/E valuation mean reversion.
-    """
-    g = (
-        (df["Earnings Growth (%)"] / 100.0)
-        .fillna(df["ROE (%)"] / 200.0)
-        .fillna(0.10)
-        .clip(lower=-0.10, upper=0.30)
-    )
-    div_yield = (df["Dividend Yield"] / 100.0).fillna(0.0).clip(upper=0.08)
 
-    current_pe = df["P/E Ratio"].replace(0, np.nan).fillna(market_pe).clip(lower=5.0, upper=100.0)
-    target_pe = 0.5 * current_pe + 0.5 * market_pe
-
-    # 1-Year Horizon (partial multiple expansion + earnings growth + div yield)
-    pe_expansion_1y = (target_pe / current_pe) ** (1.0 / 3.0)
-    ret_1y = (1.0 + g) * pe_expansion_1y - 1.0 + div_yield
-
-    # 3-Year Horizon (full multiple reversion + 3 years of compounded earnings)
-    pe_expansion_3y = target_pe / current_pe
-    ret_3y_cum = ((1.0 + g) ** 3) * pe_expansion_3y - 1.0 + (div_yield * 3.0)
-
-    # 5-Year Horizon (growth fades slightly toward long-term GDP pace)
-    g_5y = g * 0.85
-    ret_5y_cum = ((1.0 + g_5y) ** 5) * pe_expansion_3y - 1.0 + (div_yield * 5.0)
-
-    # Calculate 5Y CAGR
-    valid_ret_5y = (1.0 + ret_5y_cum).clip(lower=0.05)
-    ret_5y_cagr = (valid_ret_5y ** (1.0 / 5.0)) - 1.0
-
-    df["Est 1Y (%)"] = (ret_1y * 100.0).round(1)
-    df["Est 3Y Total (%)"] = (ret_3y_cum * 100.0).round(1)
-    df["Est 5Y Total (%)"] = (ret_5y_cum * 100.0).round(1)
-    df["Est 5Y CAGR (%)"] = (ret_5y_cagr * 100.0).round(1)
-
-    return df
 
 
 # ── Load data ─────────────────────────────────────────────
