@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import yfinance as yf
 import ta as ta_lib
@@ -36,7 +37,7 @@ h1 {
     font-weight: 700 !important;
 }
 
-h2, h3 { color: #00d4aa !important; font-weight: 600 !important; }
+h2, h3, h4 { color: #00d4aa !important; font-weight: 600 !important; }
 
 [data-testid="stCaptionContainer"] p {
     color: #6b7280 !important;
@@ -148,16 +149,49 @@ hr { border-color: #1e1e2e !important; }
     margin-right: 8px;
     font-family: monospace;
 }
-
-.section-label {
-    color: #6b7280;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 8px;
-}
 </style>
 """, unsafe_allow_html=True)
+
+
+# ── Return Estimation Engine ──────────────────────────────
+def calculate_projected_returns(df, market_pe=22.0):
+    """
+    Computes 1Y, 3Y, and 5Y forward expected returns using sustainable
+    earnings growth, dividend reinvestment, and P/E valuation mean reversion.
+    """
+    g = (
+        (df["Earnings Growth (%)"] / 100.0)
+        .fillna(df["ROE (%)"] / 200.0)
+        .fillna(0.10)
+        .clip(lower=-0.10, upper=0.30)
+    )
+    div_yield = (df["Dividend Yield"] / 100.0).fillna(0.0).clip(upper=0.08)
+
+    current_pe = df["P/E Ratio"].replace(0, np.nan).fillna(market_pe).clip(lower=5.0, upper=100.0)
+    target_pe = 0.5 * current_pe + 0.5 * market_pe
+
+    # 1-Year Horizon (partial multiple expansion + earnings growth + div yield)
+    pe_expansion_1y = (target_pe / current_pe) ** (1.0 / 3.0)
+    ret_1y = (1.0 + g) * pe_expansion_1y - 1.0 + div_yield
+
+    # 3-Year Horizon (full multiple reversion + 3 years of compounded earnings)
+    pe_expansion_3y = target_pe / current_pe
+    ret_3y_cum = ((1.0 + g) ** 3) * pe_expansion_3y - 1.0 + (div_yield * 3.0)
+
+    # 5-Year Horizon (growth fades slightly toward long-term GDP pace)
+    g_5y = g * 0.85
+    ret_5y_cum = ((1.0 + g_5y) ** 5) * pe_expansion_3y - 1.0 + (div_yield * 5.0)
+
+    # Calculate 5Y CAGR
+    valid_ret_5y = (1.0 + ret_5y_cum).clip(lower=0.05)
+    ret_5y_cagr = (valid_ret_5y ** (1.0 / 5.0)) - 1.0
+
+    df["Est 1Y (%)"] = (ret_1y * 100.0).round(1)
+    df["Est 3Y Total (%)"] = (ret_3y_cum * 100.0).round(1)
+    df["Est 5Y Total (%)"] = (ret_5y_cum * 100.0).round(1)
+    df["Est 5Y CAGR (%)"] = (ret_5y_cagr * 100.0).round(1)
+
+    return df
 
 
 # ── Load data ─────────────────────────────────────────────
@@ -174,14 +208,17 @@ def load_data():
         "Promoter Holding (%)", "Inst. Holding (%)", "Composite Score"
     ]
     for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = calculate_projected_returns(df)
     return df
 
 df = load_data()
 
 # ── Header ────────────────────────────────────────────────
 st.markdown("# 📈 Nifty 150 Stock Screener")
-st.caption("Fundamental analysis · NSE India · Data via yfinance · Refreshes every hour")
+st.caption("Fundamental analysis · NSE India · 1Y/3Y/5Y Return Estimates · Refreshes every hour")
 st.markdown("---")
 
 # ── Sidebar ───────────────────────────────────────────────
@@ -200,6 +237,7 @@ mcap_min       = st.sidebar.slider("💰 Min market cap (Cr)", 0, 1500000, 5000,
 div_min        = st.sidebar.slider("💵 Min dividend yield (%)", 0.0, 5.0, 0.0, 0.1)
 roe_min        = st.sidebar.slider("📈 Min ROE (%)", 0.0, 50.0, 0.0, 0.5)
 debt_max       = st.sidebar.slider("🏦 Max Debt/Equity", 0.0, 5.0, 5.0, 0.1)
+min_ret_1y     = st.sidebar.slider("🎯 Min 1Y Est. Return (%)", -20.0, 50.0, -20.0, 1.0)
 
 st.sidebar.markdown("---")
 
@@ -217,7 +255,7 @@ week52 = st.sidebar.radio(
 st.sidebar.markdown("---")
 st.sidebar.markdown(
     "<div style='color:#6b7280;font-size:11px;text-align:center'>"
-    "Nifty 150 Stock Screener<br>Data from NSE via yfinance<br>Not financial advice"
+    "Nifty 150 Stock Screener<br>Return models based on EPS & P/E mean reversion<br>Not financial advice"
     "</div>",
     unsafe_allow_html=True
 )
@@ -235,6 +273,7 @@ filtered = filtered[filtered["P/E Ratio"].between(pe_min, pe_max, inclusive="bot
 filtered = filtered[filtered["Market Cap (Cr)"] >= mcap_min]
 filtered = filtered[filtered["Dividend Yield"] >= div_min]
 filtered = filtered[filtered["Signal"].isin(signal_filter)]
+filtered = filtered[filtered["Est 1Y (%)"] >= min_ret_1y]
 
 if roe_min > 0:
     filtered = filtered[filtered["ROE (%)"] >= roe_min]
@@ -309,13 +348,19 @@ def color_debt(val):
     if val > 2:  return "color: #ef4444"
     return "color: #e0e0e0"
 
+def color_returns(val):
+    if pd.isna(val): return ""
+    if val > 15: return "color: #00d4aa; font-weight: 600;"
+    if val < 0:  return "color: #ef4444;"
+    return "color: #e0e0e0;"
+
 # ── Stock table ───────────────────────────────────────────
 st.markdown("### 📋 Stock table")
 
 display_cols = [
-    "Company", "Sector", "Price", "Market Cap (Cr)",
-    "P/E Ratio", "P/B Ratio", "ROE (%)", "Debt/Equity",
-    "Dividend Yield", "EPS", "Composite Score", "Signal"
+    "Company", "Sector", "Price", "P/E Ratio", "ROE (%)", 
+    "Est 1Y (%)", "Est 3Y Total (%)", "Est 5Y CAGR (%)",
+    "Composite Score", "Signal"
 ]
 
 styled = (
@@ -324,16 +369,14 @@ styled = (
     .map(color_signal, subset=["Signal"])
     .map(color_pe,     subset=["P/E Ratio"])
     .map(color_roe,    subset=["ROE (%)"])
-    .map(color_debt,   subset=["Debt/Equity"])
+    .map(color_returns, subset=["Est 1Y (%)", "Est 3Y Total (%)", "Est 5Y CAGR (%)"])
     .format({
         "Price":           "₹{:.2f}",
-        "Market Cap (Cr)": "{:,.0f}",
         "P/E Ratio":       "{:.1f}",
-        "P/B Ratio":       "{:.2f}",
         "ROE (%)":         "{:.1f}%",
-        "Debt/Equity":     "{:.2f}",
-        "Dividend Yield":  "{:.2f}%",
-        "EPS":             "{:.2f}",
+        "Est 1Y (%)":      "{:+.1f}%",
+        "Est 3Y Total (%)":"{:+.1f}%",
+        "Est 5Y CAGR (%)": "{:+.1f}%",
         "Composite Score": "{:.0f}/100",
     }, na_rep="N/A")
     .set_properties(**{
@@ -346,11 +389,11 @@ styled = (
 st.dataframe(styled, use_container_width=True, height=420)
 
 # ── Download ──────────────────────────────────────────────
-csv = filtered[display_cols].to_csv(index=False).encode("utf-8")
+csv = filtered.to_csv(index=False).encode("utf-8")
 st.download_button(
     label="⬇️ Download filtered results as CSV",
     data=csv,
-    file_name="screened_stocks.csv",
+    file_name="screened_stocks_with_returns.csv",
     mime="text/csv"
 )
 
@@ -383,11 +426,30 @@ if selected_stock:
 
     # Top metrics
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Price",          f"₹{stock_row['Price']:.2f}"          if pd.notna(stock_row["Price"])          else "N/A")
-    m2.metric("Market Cap",     f"₹{stock_row['Market Cap (Cr)']:,.0f}Cr" if pd.notna(stock_row["Market Cap (Cr)"]) else "N/A")
-    m3.metric("P/E Ratio",      f"{stock_row['P/E Ratio']:.1f}"       if pd.notna(stock_row["P/E Ratio"])      else "N/A")
-    m4.metric("Composite Score",f"{stock_row['Composite Score']:.0f}/100" if pd.notna(stock_row["Composite Score"]) else "N/A")
-    m5.metric("Signal",         str(stock_row["Signal"]))
+    m1.metric("Price",           f"₹{stock_row['Price']:.2f}"           if pd.notna(stock_row["Price"])           else "N/A")
+    m2.metric("Market Cap",      f"₹{stock_row['Market Cap (Cr)']:,.0f}Cr" if pd.notna(stock_row["Market Cap (Cr)"]) else "N/A")
+    m3.metric("P/E Ratio",       f"{stock_row['P/E Ratio']:.1f}"        if pd.notna(stock_row["P/E Ratio"])       else "N/A")
+    m4.metric("Composite Score", f"{stock_row['Composite Score']:.0f}/100" if pd.notna(stock_row["Composite Score"]) else "N/A")
+    m5.metric("Signal",          str(stock_row["Signal"]))
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Expected Returns Banner ───────────────────────────
+    st.markdown("#### 🎯 Projected Return Estimates")
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Est. 1Y Return", f"{stock_row['Est 1Y (%)']:+.1f}%" if pd.notna(stock_row["Est 1Y (%)"]) else "N/A")
+    r2.metric("Est. 3Y Return (Total)", f"{stock_row['Est 3Y Total (%)']:+.1f}%" if pd.notna(stock_row["Est 3Y Total (%)"]) else "N/A")
+    r3.metric("Est. 5Y Return (Total)", f"{stock_row['Est 5Y Total (%)']:+.1f}%" if pd.notna(stock_row["Est 5Y Total (%)"]) else "N/A")
+    r4.metric("Est. 5Y CAGR", f"{stock_row['Est 5Y CAGR (%)']:+.1f}%" if pd.notna(stock_row["Est 5Y CAGR (%)"]) else "N/A")
+
+    with st.expander("How are these returns calculated?"):
+        st.markdown("""
+        Return projections use a **Fundamental Earnings Growth + Valuation Mean-Reversion** framework:
+        - **Earnings Growth ($g$):** Evaluated from trailing earnings growth, bounded conservatively between -10% and +30%.
+        - **Valuation Normalization:** P/E ratios are modeled to gradually revert 50% toward the historical Nifty baseline (~22x).
+        - **Dividends Included:** Annual dividend yield is credited across the investment period.
+        - *Note: Return estimates are statistical projections based on fundamentals and not guaranteed performance.*
+        """)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -559,9 +621,9 @@ if len(selected_companies) > 3:
 
 if len(selected_companies) >= 2:
     compare_cols = [
-        "Company", "Sector", "Price", "P/E Ratio", "P/B Ratio",
-        "ROE (%)", "Debt/Equity", "Profit Margin (%)",
-        "Dividend Yield", "EPS", "Composite Score", "Signal"
+        "Company", "Sector", "Price", "P/E Ratio", "ROE (%)",
+        "Est 1Y (%)", "Est 3Y Total (%)", "Est 5Y CAGR (%)",
+        "Composite Score", "Signal"
     ]
 
     compare_df = df[df["Company"].isin(selected_companies)][compare_cols].set_index("Company")
@@ -570,16 +632,14 @@ if len(selected_companies) >= 2:
         compare_df.style
         .map(color_signal, subset=["Signal"])
         .map(color_roe,    subset=["ROE (%)"])
-        .map(color_debt,   subset=["Debt/Equity"])
+        .map(color_returns, subset=["Est 1Y (%)", "Est 3Y Total (%)", "Est 5Y CAGR (%)"])
         .format({
             "Price":            "₹{:.2f}",
             "P/E Ratio":        "{:.1f}",
-            "P/B Ratio":        "{:.2f}",
             "ROE (%)":          "{:.1f}%",
-            "Debt/Equity":      "{:.2f}",
-            "Profit Margin (%)":"{:.1f}%",
-            "Dividend Yield":   "{:.2f}%",
-            "EPS":              "{:.2f}",
+            "Est 1Y (%)":       "{:+.1f}%",
+            "Est 3Y Total (%)": "{:+.1f}%",
+            "Est 5Y CAGR (%)":  "{:+.1f}%",
             "Composite Score":  "{:.0f}/100",
         }, na_rep="N/A")
         .set_properties(**{
